@@ -1,60 +1,66 @@
-mod application;
-mod domain;
-mod infrastructure;
-use std::sync::Arc;
+pub mod application;
+pub mod config;
+pub mod domain;
+pub mod infrastructure;
+pub mod interfaces;
 
-use infrastructure::cache::noop_cache::NoopCache;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tracing::{info, warn};
+
+use application::use_cases::get_coffee_market_indicators::GetCoffeeMarketIndicatorsUseCase;
+use config::ServiceConfig;
+use domain::entities::coffee_market_indicators::CoffeeMarketIndicators;
+use domain::traits::cache_repository::CacheRepository;
+use infrastructure::cache::memory_cache::MemoryCache;
 use infrastructure::cache::redis_cache::RedisCache;
 use infrastructure::providers::scraper_market_provider::ScraperCoffeeMarketProvider;
 use infrastructure::time::system_clock::SystemClock;
-
-use application::use_cases::get_coffee_market_indicators::GetCoffeeMarketIndicatorsUseCase;
-
-use crate::domain::traits::cache_repository::CacheRepository;
+use interfaces::http::routes::build_router;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt::init();
+
+    let cfg = ServiceConfig::from_env();
     let provider = Arc::new(ScraperCoffeeMarketProvider::new());
 
-    //let cache = Arc::new(RedisCache::new("redis://:Secure_Void_Redis_Pass@192.168.20.4").await?);
-    let cache: Arc<dyn CacheRepository<_>> =
-        match RedisCache::new("redis://:Secure_Void_Redis_Pass@192.168.20.4").await {
+    let cache: Arc<dyn CacheRepository<CoffeeMarketIndicators>> = match cfg.redis_url {
+        Some(ref url) => match RedisCache::new(url).await {
             Ok(redis) => {
-                print!("Redis Connection OK\n");
+                info!("Connected to Redis cache backend");
                 Arc::new(redis)
             }
             Err(e) => {
-                print!("Redis Connection Error: {}\n", e);
-                Arc::new(NoopCache)
+                warn!("Redis connection failed ({e}), falling back to in-memory TTL cache");
+                Arc::new(MemoryCache::new())
             }
-        };
+        },
+        None => {
+            info!("Using in-memory TTL cache for coffee market indicators");
+            Arc::new(MemoryCache::new())
+        }
+    };
 
     let clock = Arc::new(SystemClock);
+    let use_case = Arc::new(GetCoffeeMarketIndicatorsUseCase::new(
+        provider,
+        cache,
+        clock,
+        cfg.cache_ttl_seconds,
+    ));
 
-    let use_case = GetCoffeeMarketIndicatorsUseCase::new(provider, cache, clock, 3600);
+    let app = build_router(use_case);
 
-    // --- First Call (Provider/Scraper) ---
-    let start1 = tokio::time::Instant::now();
-    let report1 = use_case.execute().await?;
-    let duration1 = start1.elapsed();
+    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
+    info!(
+        "☕ Argos Coffee Market Microservice (argos_coffee_price_scrapper) running on http://{}",
+        addr
+    );
 
-    println!("Primera llamada (Scraper): {:?}\n{:#?}", duration1, report1);
-    println!("------------------------------------------");
-
-    // --- Second Call (Redis Cache) ---
-    let start2 = tokio::time::Instant::now();
-    let report2 = use_case.execute().await?;
-    let duration2 = start2.elapsed();
-
-    println!("Segunda llamada (Cache): {:?}\n{:#?}", duration2, report2);
-
-    // Simple math to show the improvement
-    if duration1 > duration2 {
-        println!(
-            "\nEfficiency gain: {:.2}x faster",
-            duration1.as_secs_f64() / duration2.as_secs_f64()
-        );
-    }
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

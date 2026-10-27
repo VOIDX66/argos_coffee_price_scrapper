@@ -45,7 +45,7 @@ where
         let today = self.clock.today();
 
         if let Some(ref cached) = cached {
-            if cached.publication_date == today || !self.clock.is_market_day() {
+            if cached.publication_date == today {
                 return Ok(cached.clone());
             }
         }
@@ -259,6 +259,60 @@ mod tests {
 
         let cached_after = cache_storage.lock().unwrap().clone().unwrap();
         assert_eq!(cached_after.publication_date, today);
+    }
+
+    #[tokio::test]
+    async fn should_refresh_on_weekend_when_cached_publication_date_is_old() {
+        struct WeekendClock {
+            pub date: NaiveDate,
+        }
+        impl Clock for WeekendClock {
+            fn today(&self) -> NaiveDate {
+                self.date
+            }
+            fn is_market_day(&self) -> bool {
+                false
+            }
+        }
+
+        let saturday = NaiveDate::from_ymd_opt(2025, 1, 11).unwrap();
+        let friday = NaiveDate::from_ymd_opt(2025, 1, 10).unwrap();
+        let provider_called = Arc::new(Mutex::new(false));
+
+        let new_report = CoffeeMarketIndicators::new(
+            saturday,
+            2_100_000.0,
+            0.0,
+            300.95,
+            3130.0,
+            0.0,
+        );
+
+        let provider = Arc::new(MockProvider {
+            response: new_report,
+            called: provider_called.clone(),
+        });
+
+        let old_cached_value = CoffeeMarketIndicators::new(
+            friday,
+            2_050_000.0,
+            0.0,
+            298.00,
+            3120.0,
+            0.0,
+        );
+
+        let cache = Arc::new(MockCache {
+            stored: Arc::new(Mutex::new(Some(old_cached_value))),
+        });
+
+        let clock = Arc::new(WeekendClock { date: saturday });
+        let use_case = GetCoffeeMarketIndicatorsUseCase::new(provider, cache, clock, 3600);
+
+        let result = use_case.execute().await.unwrap();
+        assert!(*provider_called.lock().unwrap());
+        assert_eq!(result.publication_date, saturday);
+        assert_eq!(result.internal_price_cop, 2_100_000.0);
     }
 
     #[tokio::test]
