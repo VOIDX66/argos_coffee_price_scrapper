@@ -12,6 +12,7 @@ use application::use_cases::get_coffee_market_indicators::GetCoffeeMarketIndicat
 use config::ServiceConfig;
 use domain::entities::coffee_market_indicators::CoffeeMarketIndicators;
 use domain::traits::cache_repository::CacheRepository;
+use infrastructure::cache::file_history_repository::FileHistoryRepository;
 use infrastructure::cache::memory_cache::MemoryCache;
 use infrastructure::cache::redis_cache::RedisCache;
 use infrastructure::providers::scraper_market_provider::ScraperCoffeeMarketProvider;
@@ -70,16 +71,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let clock = Arc::new(SystemClock);
-    let use_case = Arc::new(GetCoffeeMarketIndicatorsUseCase::new(
-        provider,
-        cache,
-        clock,
-        cfg.cache_ttl_seconds,
-    ));
+    let history = Arc::new(FileHistoryRepository::default_persistent());
+    let use_case = Arc::new(
+        GetCoffeeMarketIndicatorsUseCase::new(provider, cache, clock, cfg.cache_ttl_seconds)
+            .with_history(history),
+    );
 
     spawn_cache_warmup(use_case.clone());
 
     let app = build_router(use_case);
+
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     info!(

@@ -49,6 +49,8 @@ where
         .route("/info", get(info_handler))
         .route("/coffee", get(coffee_toon_handler::<P, T>))
         .route("/price", get(coffee_toon_handler::<P, T>))
+        .route("/history", get(coffee_history_toon_handler::<P, T>))
+        .route("/history/json", get(coffee_history_json_handler::<P, T>))
         .route("/json", get(coffee_json_handler::<P, T>))
         .with_state(state)
 }
@@ -71,7 +73,8 @@ async fn info_handler() -> Response {
             "pasilla_cop",
             "ny_price_usd",
             "exchange_rate_cop_usd",
-            "mecic_cop"
+            "mecic_cop",
+            "history"
         ]
     });
 
@@ -108,6 +111,50 @@ where
     }
 }
 
+async fn coffee_history_toon_handler<P, T>(State(state): State<CoffeeAppState<P, T>>) -> Response
+where
+    P: CoffeeMarketProvider + 'static,
+    T: Clock + 'static,
+{
+    info!("Fetching coffee historical indicators (TOON)");
+    match state.use_case.get_history(30).await {
+        Ok(records) => {
+            let toon = CoffeeMarketIndicators::format_history_toon(&records);
+            ([("content-type", "text/plain; charset=utf-8")], toon).into_response()
+        }
+        Err(e) => {
+            error!("Failed to fetch coffee historical indicators: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("error:No se pudo obtener el historial del café: {e}"),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn coffee_history_json_handler<P, T>(State(state): State<CoffeeAppState<P, T>>) -> Response
+where
+    P: CoffeeMarketProvider + 'static,
+    T: Clock + 'static,
+{
+    match state.use_case.get_history(30).await {
+        Ok(records) => Json(json!({
+            "service": "argos_coffee_price_scrapper",
+            "count": records.len(),
+            "records": records
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": format!("No se pudo obtener el historial del café: {e}")
+            })),
+        )
+            .into_response(),
+    }
+}
+
 async fn coffee_json_handler<P, T>(State(state): State<CoffeeAppState<P, T>>) -> Response
 where
     P: CoffeeMarketProvider + 'static,
@@ -136,6 +183,7 @@ pub fn indicators_to_json(ind: &CoffeeMarketIndicators) -> serde_json::Value {
         "mecic_cop": ind.mecic_cop
     })
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -213,7 +261,32 @@ mod tests {
 
         // 4. /price (alias for /coffee)
         let res = app
+            .clone()
             .oneshot(Request::builder().uri("/price").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 5. /history (TOON tabular summary + daily records)
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri("/history").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let hist_toon = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(hist_toon.contains("resumen_historico{"));
+        assert!(hist_toon.contains("historial_diario[1]{"));
+
+        // 6. /history/json
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/history/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);

@@ -8,6 +8,7 @@ use crate::domain::entities::coffee_market_indicators::CoffeeMarketIndicators;
 use crate::domain::traits::cache_repository::CacheRepository;
 use crate::domain::traits::clock::Clock;
 use crate::domain::traits::coffee_market_provider::CoffeeMarketProvider;
+use crate::domain::traits::history_repository::HistoryRepository;
 
 pub struct GetCoffeeMarketIndicatorsUseCase<P, T>
 where
@@ -20,6 +21,7 @@ where
     ttl_seconds: u64,
     refresh_lock: tokio::sync::Mutex<()>,
     last_verified_at: tokio::sync::RwLock<Option<Instant>>,
+    history: Option<Arc<dyn HistoryRepository>>,
 }
 
 impl<P, T> GetCoffeeMarketIndicatorsUseCase<P, T>
@@ -40,7 +42,31 @@ where
             ttl_seconds,
             refresh_lock: tokio::sync::Mutex::new(()),
             last_verified_at: tokio::sync::RwLock::new(None),
+            history: None,
         }
+    }
+
+    pub fn with_history(mut self, history: Arc<dyn HistoryRepository>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    pub async fn get_history(&self, limit: usize) -> Result<Vec<CoffeeMarketIndicators>> {
+        if let Some(ref hist) = self.history {
+            let existing = hist.get_recent(limit).await?;
+            if !existing.is_empty() {
+                return Ok(existing);
+            }
+        }
+        let current = self.execute().await?;
+        if let Some(ref hist) = self.history {
+            let _ = hist.save_daily(&current).await;
+            let updated = hist.get_recent(limit).await?;
+            if !updated.is_empty() {
+                return Ok(updated);
+            }
+        }
+        Ok(vec![current])
     }
 
     async fn is_recently_verified(&self) -> bool {
@@ -86,6 +112,11 @@ where
         let report = match self.provider.get_market_indicators().await {
             Ok(report) => {
                 self.cache.set(cache_key, &report, self.ttl_seconds).await?;
+                if let Some(ref hist) = self.history {
+                    if let Err(e) = hist.save_daily(&report).await {
+                        warn!("Failed to record daily coffee history: {e}");
+                    }
+                }
                 *self.last_verified_at.write().await = Some(Instant::now());
                 info!(
                     "CACHE STORED for coffee indicators (publication_date={}, ttl={}s)",
@@ -106,6 +137,7 @@ where
         Ok(report)
     }
 }
+
 
 #[cfg(test)]
 mod tests {
