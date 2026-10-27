@@ -1,6 +1,8 @@
 // get_coffee_market_indicator.rs
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 use crate::domain::entities::coffee_market_indicators::CoffeeMarketIndicators;
 use crate::domain::traits::cache_repository::CacheRepository;
@@ -17,6 +19,7 @@ where
     clock: Arc<T>,
     ttl_seconds: u64,
     refresh_lock: tokio::sync::Mutex<()>,
+    last_verified_at: tokio::sync::RwLock<Option<Instant>>,
 }
 
 impl<P, T> GetCoffeeMarketIndicatorsUseCase<P, T>
@@ -36,6 +39,15 @@ where
             clock,
             ttl_seconds,
             refresh_lock: tokio::sync::Mutex::new(()),
+            last_verified_at: tokio::sync::RwLock::new(None),
+        }
+    }
+
+    async fn is_recently_verified(&self) -> bool {
+        if let Some(verified_at) = *self.last_verified_at.read().await {
+            verified_at.elapsed() < Duration::from_secs(self.ttl_seconds)
+        } else {
+            false
         }
     }
 
@@ -44,7 +56,11 @@ where
         let today = self.clock.today();
 
         if let Some(cached) = self.cache.get(cache_key).await? {
-            if cached.publication_date == today {
+            if cached.publication_date >= today || self.is_recently_verified().await {
+                info!(
+                    "CACHE HIT for coffee indicators (publication_date={}, today_colombia={})",
+                    cached.publication_date, today
+                );
                 return Ok(cached);
             }
         }
@@ -53,18 +69,32 @@ where
 
         let cached = self.cache.get(cache_key).await?;
         if let Some(ref cached) = cached {
-            if cached.publication_date == today {
+            if cached.publication_date >= today || self.is_recently_verified().await {
+                info!(
+                    "CACHE HIT (after lock) for coffee indicators (publication_date={}, today_colombia={})",
+                    cached.publication_date, today
+                );
                 return Ok(cached.clone());
             }
         }
 
+        info!(
+            "CACHE MISS for coffee indicators (today_colombia={}), scraping FNC...",
+            today
+        );
+
         let report = match self.provider.get_market_indicators().await {
             Ok(report) => {
                 self.cache.set(cache_key, &report, self.ttl_seconds).await?;
+                *self.last_verified_at.write().await = Some(Instant::now());
+                info!(
+                    "CACHE STORED for coffee indicators (publication_date={}, ttl={}s)",
+                    report.publication_date, self.ttl_seconds
+                );
                 report
             }
             Err(e) => {
-                log::warn!("Provider failed: {}. Trying to return cached data.", e);
+                warn!("Provider failed: {}. Trying to return cached data.", e);
                 if let Some(cached) = cached {
                     cached
                 } else {
@@ -449,6 +479,53 @@ mod tests {
 
         assert_eq!(r1.unwrap().internal_price_cop, 2_450_000.0);
         assert_eq!(r2.unwrap().internal_price_cop, 2_450_000.0);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn should_not_rescrape_repeatedly_when_fnc_publishes_previous_date() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingProvider {
+            pub response: CoffeeMarketIndicators,
+            pub call_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoffeeMarketProvider for CountingProvider {
+            async fn get_market_indicators(&self) -> Result<CoffeeMarketIndicators> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(self.response.clone())
+            }
+        }
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let fnc_date = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let provider = Arc::new(CountingProvider {
+            response: CoffeeMarketIndicators::new(
+                fnc_date,
+                2_100_000.0,
+                0.0,
+                300.95,
+                3130.0,
+                0.0,
+            ),
+            call_count: call_count.clone(),
+        });
+
+        let cache = Arc::new(MockCache {
+            stored: Arc::new(Mutex::new(None)),
+        });
+        let clock = Arc::new(FixedClock { date: today });
+        let use_case = GetCoffeeMarketIndicatorsUseCase::new(provider, cache, clock, 3600);
+
+        let r1 = use_case.execute().await.unwrap();
+        let r2 = use_case.execute().await.unwrap();
+
+        assert_eq!(r1.internal_price_cop, 2_100_000.0);
+        assert_eq!(r2.internal_price_cop, 2_100_000.0);
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 }
