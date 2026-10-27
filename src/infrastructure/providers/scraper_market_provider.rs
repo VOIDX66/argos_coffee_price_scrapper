@@ -47,7 +47,7 @@ impl ScraperCoffeeMarketProvider {
 
         let client = Client::builder()
             .default_headers(headers)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(14))
             .build()
             .unwrap_or_else(|_| Client::new());
 

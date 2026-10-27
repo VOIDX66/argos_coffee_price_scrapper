@@ -18,6 +18,32 @@ use infrastructure::providers::scraper_market_provider::ScraperCoffeeMarketProvi
 use infrastructure::time::system_clock::SystemClock;
 use interfaces::http::routes::build_router;
 
+use domain::traits::clock::Clock;
+use domain::traits::coffee_market_provider::CoffeeMarketProvider;
+
+pub fn spawn_cache_warmup<P, T>(
+    use_case: Arc<GetCoffeeMarketIndicatorsUseCase<P, T>>,
+) -> tokio::task::JoinHandle<()>
+where
+    P: CoffeeMarketProvider + 'static,
+    T: Clock + 'static,
+{
+    tokio::spawn(async move {
+        info!("Pre-warming coffee market indicators cache in background...");
+        match use_case.execute().await {
+            Ok(indicators) => {
+                info!(
+                    "Coffee market indicators cache pre-warmed (publication_date={})",
+                    indicators.publication_date
+                );
+            }
+            Err(e) => {
+                warn!("Background cache pre-warm failed: {e}");
+            }
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -51,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
         cfg.cache_ttl_seconds,
     ));
 
+    spawn_cache_warmup(use_case.clone());
+
     let app = build_router(use_case);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
@@ -64,3 +92,77 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    struct MockProvider {
+        should_fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl CoffeeMarketProvider for MockProvider {
+        async fn get_market_indicators(&self) -> anyhow::Result<CoffeeMarketIndicators> {
+            if self.should_fail {
+                Err(anyhow::anyhow!("simulated scrape failure"))
+            } else {
+                Ok(CoffeeMarketIndicators::new(
+                    NaiveDate::from_ymd_opt(2026, 10, 26).unwrap(),
+                    2_450_000.0,
+                    75_000.0,
+                    252.35,
+                    4210.50,
+                    2_410_000.0,
+                ))
+            }
+        }
+    }
+
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn today(&self) -> NaiveDate {
+            NaiveDate::from_ymd_opt(2026, 10, 26).unwrap()
+        }
+        fn is_market_day(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_cache_warmup_populates_cache() {
+        let cache = Arc::new(MemoryCache::new());
+        let use_case = Arc::new(GetCoffeeMarketIndicatorsUseCase::new(
+            Arc::new(MockProvider { should_fail: false }),
+            cache.clone(),
+            Arc::new(FixedClock),
+            3600,
+        ));
+
+        let handle = spawn_cache_warmup(use_case);
+        handle.await.unwrap();
+
+        let cached = cache.get("coffee:market:indicators").await.unwrap();
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().internal_price_cop, 2_450_000.0);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_cache_warmup_handles_provider_failure_gracefully() {
+        let cache = Arc::new(MemoryCache::new());
+        let use_case = Arc::new(GetCoffeeMarketIndicatorsUseCase::new(
+            Arc::new(MockProvider { should_fail: true }),
+            cache.clone(),
+            Arc::new(FixedClock),
+            3600,
+        ));
+
+        let handle = spawn_cache_warmup(use_case);
+        handle.await.unwrap();
+
+        let cached = cache.get("coffee:market:indicators").await.unwrap();
+        assert!(cached.is_none());
+    }
+}
+
