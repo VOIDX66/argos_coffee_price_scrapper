@@ -47,6 +47,7 @@ where
     Router::new()
         .route("/health", get(health_handler))
         .route("/info", get(info_handler))
+        .route("/info/json", get(info_json_handler))
         .route("/coffee", get(coffee_toon_handler::<P, T>))
         .route("/price", get(coffee_toon_handler::<P, T>))
         .route("/history", get(coffee_history_toon_handler::<P, T>))
@@ -63,8 +64,8 @@ async fn health_handler() -> Json<serde_json::Value> {
     }))
 }
 
-async fn info_handler() -> Response {
-    let info = json!({
+fn coffee_service_info() -> serde_json::Value {
+    json!({
         "service": "argos_coffee_price_scrapper",
         "protocol": "TOON",
         "source": "Federación Nacional de Cafeteros de Colombia",
@@ -75,11 +76,47 @@ async fn info_handler() -> Response {
             "exchange_rate_cop_usd",
             "mecic_cop",
             "history"
+        ],
+        "tools": [
+            {
+                "name": "get_coffee_price",
+                "description": "Consulta el precio interno del café en Colombia (por carga de 125kg), pasilla, bolsa de Nueva York y TRM oficial de la Federación Nacional de Cafeteros (FNC).",
+                "endpoint": "/coffee",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "get_coffee_history",
+                "description": "Consulta el resumen histórico y la tabla diaria de precios de café en Colombia (mínimos, máximos, promedios y variación del período).",
+                "endpoint": "/history",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
         ]
-    });
+    })
+}
+
+async fn info_handler(headers: axum::http::HeaderMap) -> Response {
+    let info = coffee_service_info();
+    if headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .contains("application/json")
+    {
+        return Json(info).into_response();
+    }
 
     let toon = toon_codec::to_toon(&info).unwrap_or_default();
     ([("content-type", "text/plain; charset=utf-8")], toon).into_response()
+}
+
+async fn info_json_handler() -> Json<serde_json::Value> {
+    Json(coffee_service_info())
 }
 
 async fn coffee_toon_handler<P, T>(State(state): State<CoffeeAppState<P, T>>) -> Response
@@ -246,6 +283,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+
+        // 2b. /info/json
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri("/info/json").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json_val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let tools = json_val["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "get_coffee_price");
+        assert_eq!(tools[1]["name"], "get_coffee_history");
 
         // 3. /coffee (TOON)
         let res = app
