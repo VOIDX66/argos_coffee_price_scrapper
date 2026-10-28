@@ -82,7 +82,10 @@ async fn main() -> anyhow::Result<()> {
     let app = build_router(use_case);
 
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| format!("127.0.0.1:{}", cfg.port));
+    let addr: SocketAddr = bind_addr
+        .parse()
+        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], cfg.port)));
     info!(
         "☕ Argos Coffee Market Microservice (argos_coffee_price_scrapper) running on http://{}",
         addr
