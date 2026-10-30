@@ -51,10 +51,11 @@ impl ScraperCoffeeMarketProvider {
             .build()
             .unwrap_or_else(|_| Client::new());
 
+        let fallback_sel = Selector::parse("*").unwrap_or_else(|_| unreachable!());
         let selectors = ScraperSelectors {
-            menu_item: Selector::parse(".e-n-menu-item").expect("Invalid menu item selector"),
-            title: Selector::parse(".e-n-menu-title-text").expect("Invalid title selector"),
-            content: Selector::parse(".e-n-menu-content").expect("Invalid content selector"),
+            menu_item: Selector::parse(".e-n-menu-item").unwrap_or_else(|_| fallback_sel.clone()),
+            title: Selector::parse(".e-n-menu-title-text").unwrap_or_else(|_| fallback_sel.clone()),
+            content: Selector::parse(".e-n-menu-content").unwrap_or(fallback_sel),
         };
 
         Self {

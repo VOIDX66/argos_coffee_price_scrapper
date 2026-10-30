@@ -10,7 +10,8 @@ pub struct SystemClock;
 impl SystemClock {
     fn now_colombia() -> chrono::DateTime<FixedOffset> {
         let offset = FixedOffset::east_opt(COLOMBIA_UTC_OFFSET_SECS)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC offset 0 is always valid"));
+            .or_else(|| FixedOffset::east_opt(0))
+            .unwrap_or(FixedOffset::east_opt(0).unwrap_or_else(|| unreachable!()));
         Utc::now().with_timezone(&offset)
     }
 }
